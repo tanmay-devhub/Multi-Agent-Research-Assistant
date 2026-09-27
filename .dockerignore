@@ -1,0 +1,19 @@
+# Keep the image small and free of secrets / local cruft.
+.venv/
+.env
+*.env
+!.env.example
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+tests/
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+last_run_id.txt
+*.log
+dump.rdb

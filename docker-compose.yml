@@ -1,0 +1,45 @@
+# Hardened local/prod-like deployment (§6, §12).
+# Redis is INTERNAL-ONLY (not published to the host) and password-protected.
+# The API is published only to host loopback. Secrets come from the environment / .env
+# (compose interpolation) and are NEVER baked into the image.
+#
+# Usage: set REDIS_PASSWORD (and provider keys) in the shell or .env, then: docker compose up --build
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server --save "" --appendonly no
+      --requirepass "${REDIS_PASSWORD:?set REDIS_PASSWORD}"
+    networks: [internal]        # no `ports:` → unreachable from outside the compose network
+    read_only: true
+    tmpfs: ["/data"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+
+  api:
+    build: .
+    depends_on: [redis]
+    environment:
+      ENVIRONMENT: production
+      ENABLE_DOCS: "false"
+      ALLOW_PRIVATE_NETWORKS: "false"
+      TRUSTED_HOSTS: "${TRUSTED_HOSTS:-localhost,127.0.0.1}"
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY:-}"
+      TAVILY_API_KEY: "${TAVILY_API_KEY:-}"
+    ports:
+      - "127.0.0.1:8000:8000"   # host loopback only; front with a reverse proxy for public exposure
+    networks: [internal]
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+
+networks:
+  internal:
+    driver: bridge

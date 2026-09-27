@@ -13,6 +13,7 @@ from app.config import settings
 from app.schemas import RunState, StepLog, SubQuestionStatus
 
 RESEARCHER = "researcher"
+ANALYZE = "analyze"      # post-research contradiction detection, then the writer
 WRITER = "writer"
 
 
@@ -24,22 +25,41 @@ def elapsed_seconds(state: RunState) -> float:
     return (_utcnow() - state.created_at).total_seconds()
 
 
+def budget_status(state: RunState):
+    """Return the specific terminal RunStatus for the first exhausted budget, else None.
+
+    All caps are deterministic and persistent; retries and provider fallbacks consume the same
+    counters, and resume never resets them (§5).
+    """
+    from app.schemas import RunStatus
+
+    if state.cumulative_tokens >= settings.max_total_tokens:
+        return RunStatus.token_budget_exhausted
+    if elapsed_seconds(state) >= settings.wall_clock_seconds:
+        return RunStatus.wall_clock_exhausted
+    if state.searches_used >= settings.max_total_searches:
+        return RunStatus.search_budget_exhausted
+    if state.fetches_used >= settings.max_total_fetches:
+        return RunStatus.fetch_budget_exhausted
+    if len(state.step_log) >= settings.max_graph_transitions:
+        return RunStatus.step_budget_exhausted
+    return None
+
+
 def budget_exceeded(state: RunState) -> bool:
-    """Hard caps: total tokens or wall-clock. Sub-question and per-search caps are enforced
-    upstream (planner caps the count; researcher caps queries)."""
-    return (
-        state.cumulative_tokens >= settings.max_total_tokens
-        or elapsed_seconds(state) >= settings.wall_clock_seconds
-    )
+    """True if any hard budget is exhausted (tokens, wall-clock, searches, fetches, steps)."""
+    return budget_status(state) is not None
 
 
 def route_after_planner(state: RunState) -> str:
+    if state.cancel_requested:
+        return ANALYZE  # durable cancellation → finalize, no new work (§13)
     if state.plan is None or not state.plan.sub_questions:
-        return WRITER
+        return ANALYZE
     if budget_exceeded(state):
-        return WRITER
+        return ANALYZE
     if state.current_index >= len(state.plan.sub_questions):
-        return WRITER  # research already complete (resume case) — go straight to the writer
+        return ANALYZE  # research already complete (resume case) — analyze then write
     return RESEARCHER
 
 
@@ -86,8 +106,10 @@ def review(state: RunState) -> dict:
 
 
 def route_after_review(state: RunState) -> str:
+    if state.cancel_requested:
+        return ANALYZE
     if budget_exceeded(state):
-        return WRITER
+        return ANALYZE
     if state.plan is not None and state.current_index < len(state.plan.sub_questions):
         return RESEARCHER
-    return WRITER
+    return ANALYZE

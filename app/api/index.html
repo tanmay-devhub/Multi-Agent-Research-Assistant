@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Multi-Agent Research Assistant</title>
+<style>
+  :root { color-scheme: dark; --bg:#0f1115; --panel:#181b22; --border:#2a2f3a;
+          --fg:#e6e8ee; --muted:#8b93a7; --accent:#6ea8fe; --ok:#4ade80; --bad:#f87171; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+  textarea { width:100%; min-height:74px; resize:vertical; padding:12px; border-radius:10px;
+             border:1px solid var(--border); background:var(--panel); color:var(--fg); font:inherit; }
+  .row { display:flex; gap:10px; margin-top:10px; align-items:center; }
+  button { padding:10px 18px; border:0; border-radius:10px; background:var(--accent); color:#0b1020;
+           font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .pill { font-size:12px; color:var(--muted); }
+  .pill b { color:var(--fg); }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; margin-top:20px; }
+  .card h2 { font-size:14px; margin:0 0 10px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .log { font-family:ui-monospace,Consolas,monospace; font-size:13px; }
+  .log .line { padding:4px 0; border-bottom:1px solid var(--border); }
+  .log .agent { color:var(--accent); display:inline-block; min-width:92px; }
+  .log .meta { color:var(--muted); }
+  .report { white-space:pre-wrap; }
+  .cites { margin-top:14px; }
+  .cite { font-size:13px; color:var(--muted); padding:3px 0; }
+  .cite a { color:var(--accent); text-decoration:none; word-break:break-all; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Multi-Agent Research Assistant</h1>
+  <p class="sub">Ask a question → planner · researchers · writer produce a fully-cited report. Live trace below.</p>
+
+  <textarea id="q" placeholder="e.g. What are the main benefits and risks of retrieval-augmented generation?"></textarea>
+  <div class="row">
+    <button id="go">Research</button>
+    <span class="pill" id="meta"></span>
+  </div>
+
+  <div class="card hidden" id="progressCard">
+    <h2>Progress</h2>
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="card hidden" id="reportCard">
+    <h2>Report <span id="valid" class="pill"></span></h2>
+    <div class="report" id="report"></div>
+    <div class="cites" id="cites"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const go = $("go");
+
+go.onclick = async () => {
+  const question = $("q").value.trim();
+  if (!question) return;
+  go.disabled = true;
+  $("log").innerHTML = "";
+  $("progressCard").classList.remove("hidden");
+  $("reportCard").classList.add("hidden");
+  $("meta").textContent = "starting…";
+
+  let runId;
+  try {
+    const res = await fetch("/research", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    });
+    if (!res.ok) throw new Error("POST /research " + res.status + " " + (await res.text()));
+    runId = (await res.json()).run_id;
+  } catch (e) { fail(e.message); return; }
+
+  $("meta").innerHTML = "run <b>" + runId + "</b>";
+  const es = new EventSource(`/research/${runId}/stream`);
+  es.onmessage = (ev) => {
+    const d = JSON.parse(ev.data);
+    if (d.type === "step") {
+      const line = document.createElement("div");
+      line.className = "line";
+      line.innerHTML = `<span class="agent">${d.agent}</span>` +
+        `<span>${escapeHtml(d.output)}</span> ` +
+        `<span class="meta">· ${d.tokens} tok · ${d.latency_ms} ms</span>`;
+      $("log").appendChild(line);
+    } else if (d.type === "status") {
+      $("meta").innerHTML = "run <b>" + runId + "</b> · " + d.status;
+    } else if (d.type === "done") {
+      es.close();
+      loadReport(runId, d);
+    }
+  };
+  es.onerror = () => { es.close(); go.disabled = false; };
+};
+
+async function loadReport(runId, done) {
+  try {
+    const r = await (await fetch(`/research/${runId}`)).json();
+    $("reportCard").classList.remove("hidden");
+    if (r.report) {
+      $("report").textContent = r.report.body;
+      const v = r.report.citations_valid;
+      $("valid").className = "pill " + (v ? "ok" : "bad");
+      $("valid").textContent = (v ? "✓ citations valid" : "✗ citation mismatch") +
+        " · " + r.report.citations.length + " citations · " + r.cumulative_tokens + " tokens";
+      $("cites").innerHTML = r.report.citations.map(c =>
+        `<div class="cite">${escapeHtml(c.marker)} <a href="${c.source_url}" target="_blank" rel="noopener">${escapeHtml(c.source_url)}</a></div>`
+      ).join("");
+    } else {
+      $("report").textContent = "Run ended (" + r.status + ") with no report.";
+    }
+  } catch (e) { fail(e.message); }
+  go.disabled = false;
+}
+
+function fail(msg) {
+  $("progressCard").classList.remove("hidden");
+  $("log").innerHTML = `<div class="line bad">${escapeHtml(msg)}</div>`;
+  go.disabled = false;
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+</script>
+</body>
+</html>

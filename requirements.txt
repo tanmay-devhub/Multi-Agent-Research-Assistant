@@ -1,28 +1,25 @@
+# Runtime dependencies only (pinned for reproducible, auditable builds).
+# Dev/test/security tooling lives in requirements-dev.txt.
+
 # Orchestration
-langgraph
-langchain-core
+langgraph==1.2.12
+langchain-core==1.6.5
 
-# LLM providers — the provider chain is set via PRIMARY_PROVIDER / FALLBACK_PROVIDERS in .env
-langchain-google-genai   # gemini (primary, free tier)
-langchain-openai         # ollama_cloud + openrouter + openai_compatible (all OpenAI-compatible)
+# LLM providers — chain set via PRIMARY_PROVIDER / FALLBACK_PROVIDERS in .env
+langchain-google-genai==4.4.0   # gemini (primary)
+langchain-openai==1.6.6         # openrouter + ollama_cloud (OpenAI-compatible endpoints)
 
-# Search
-tavily-python
+# Search + SSRF-safe fetch
+tavily-python==0.8.4
+httpx==0.28.1
 
 # State store
-redis
+redis==8.1.0
 
 # API
-fastapi
-uvicorn[standard]
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
 
 # Schemas / config
-pydantic
-pydantic-settings
-
-# HTTP / page fetch
-httpx
-
-# Testing
-pytest
-pytest-asyncio
+pydantic==2.13.5
+pydantic-settings==2.15.0

@@ -7,10 +7,15 @@ topology on LangGraph.
 Full spec & rules: [`../Agent.MD`](../Agent.MD). Task backlog: [`../Task.MD`](../Task.MD).
 
 ## Status
-**Phases 0–4 complete and verified live** (2026-09-27): the full pipeline ran end-to-end (a sample
-question produced 4 sub-questions, 22 findings, 22/22 cited, ~4 min), with Redis persistence,
-resume-without-replay, and provider failover all confirmed. **Phase 5** (the research API +
-streaming + browser UI) is not built yet — only `/health` is live so far.
+**All phases (0–5) complete and live-verified, plus production security hardening and three
+extensions** (2026-09-27). The pipeline runs end-to-end (cited report with intact provenance),
+Redis persistence + resume-without-replay + provider failover confirmed, the FastAPI API + SSE +
+browser UI are live, and the security suite is green (`pytest tests/security/ -v` → 64 passed).
+Extensions: cross-source **contradiction detection**, source **credibility scoring**, and a
+**red-team test suite**. See [`SECURITY.md`](../SECURITY.md).
+
+> Note: on the free LLM tier a full run is latency-bound (~5–10 min) and may end in a graceful
+> `*_exhausted`/`failed` terminal state under quota load (findings preserved, never a crash).
 
 ## Stack
 Python 3.11–3.14 · LangGraph · Tavily · Redis · FastAPI · Pydantic v2 · LLM: **cloud provider chain**
@@ -53,25 +58,30 @@ copy .env.example .env            # then fill in keys
   persistence or crash-resume.
 
 ## Run
-The research **API** is Phase 5. Until then, drive the graph directly:
 ```bash
-# one full run (plan → research → write), state mirrored to Redis:
+uvicorn app.main:app          # do NOT use --reload in production
+# UI:    http://localhost:8000/        (ask a question, watch live progress, read the cited report)
+# health: /health  ·  readiness: /ready  ·  docs (dev only): /docs
+```
+Or drive the graph directly, no server:
+```bash
 .venv\Scripts\python -c "from app.graph.builder import run_research; s=run_research('Your question?'); print(s.status); print(s.report.body)"
-
-# resume a run by id (continues from the last node, no replay):
+# resume a run (continues from the last node, no replay):
 .venv\Scripts\python -c "from app.graph.builder import resume_research; print(resume_research('<run_id>').status)"
 ```
-The FastAPI server currently exposes only the health check:
-```bash
-uvicorn app.main:app --reload
-# http://localhost:8000/health  -> {"status":"ok","provider_chain":[...]}
-# http://localhost:8000/docs    -> Swagger UI
-```
+Production: use the hardened `docker-compose.yml` (`ENVIRONMENT=production` disables docs, enforces
+config validation; Redis stays internal-only; API binds host loopback).
 
-## API (arrives in Phase 5 — not built yet)
-- `POST /research` → returns `run_id` immediately (async)
-- `GET /research/{id}` → status, then the finished cited report
-- `GET /research/{id}/trace` → full step log (agent, input, output, tools, tokens, latency)
+## API
+- `POST /research` → `202` + `run_id` (async; runs on a background worker)
+- `GET /research/{id}` → status + cited report (`citations_valid`, source/finding/token counts)
+- `GET /research/{id}/trace` → full step log (agent, output, tokens, latency)
+- `GET /research/{id}/stream` → **SSE** live progress
+- `POST /research/{id}/cancel` → durable cancellation (`cancelled` state, findings kept)
+- `GET /` → browser UI · `GET /health` (liveness) · `GET /ready` (readiness)
+
+Run-scoped endpoints pass through an authorization hook — **knowing a `run_id` is not
+authorization** (single-user permissive by default; wire real auth in `app/api/security.py`).
 
 ## How it works
 1. **Planner** (LLM) → splits the question into focused sub-questions (`app/agents/planner.py`).
@@ -80,10 +90,22 @@ uvicorn app.main:app --reload
    (`app/agents/researcher.py`, `app/tools/search.py`).
 3. **Supervisor** (pure code, no LLM) → reviews, routes, retries once, enforces budgets
    (`app/graph/supervisor.py`).
-4. **Writer** (LLM) → cited report; citations validated against real findings (`app/agents/writer.py`).
+4. **Analyze** (LLM) → flags cross-source **contradictions** for the same sub-question
+   (`app/agents/contradiction.py`); the writer surfaces them with `[CONFLICTING]` markers.
+5. **Writer** (LLM) → cited report; citations validated against real findings; prefers
+   higher-**credibility** sources (`app/credibility.py`) and flags low-credibility ones.
 
-The graph is wired in `app/graph/builder.py`; `RunState` (`app/schemas/models.py`) is both the
-graph state and the persisted object.
+Graph: `planner → researcher → review → analyze → writer`, wired in `app/graph/builder.py`.
+`RunState` (`app/schemas/models.py`) is both the graph state and the persisted object.
+
+## Security
+Production-hardened: SSRF-safe web fetch (single egress, private/metadata-IP blocking, redirect
+re-validation), deterministic prompt-injection isolation, a full provenance chain (every citation →
+finding → fetched source), hard budgets with explicit terminal states, safe Redis state (versioned,
+validated, locked), and a hardened API (strict schemas, CSP/security headers, sanitized errors,
+authz/quota hooks). Full model: [`SECURITY.md`](../SECURITY.md). Deploy with the hardened
+`docker-compose.yml` (non-root, read-only FS, internal-only Redis). Scan with `pip-audit` / `bandit`
+(`requirements-dev.txt`).
 
 ## What makes this real (not a demo)
 - Budgets enforced in code (`app/config.py`), never in prompts: max sub-questions, searches/sub-q,
@@ -93,9 +115,26 @@ graph state and the persisted object.
 - Every finding carries provenance; every claim is a citation validated against a real finding.
 - Run state persisted to Redis after every node → a killed process **resumes, it does not replay**
   (verified live via `resume_research`).
+- Cross-source **contradictions** are detected and surfaced; sources carry a **credibility score**
+  the writer uses to prefer authoritative evidence and flag weak sources.
+- Security is deterministic and code-enforced (SSRF, provenance, budgets, redaction) — not
+  prompt-based — and covered by an offline red-team test suite.
+
+## Tests
+Tests + dev tooling live in the **parent folder** (`../`) so this folder stays deployable. Run from
+the parent (`D:\RA`) using this project's venv:
+```bash
+RAA\.venv\Scripts\python -m pip install -r requirements-dev.txt
+RAA\.venv\Scripts\python -m pytest tests/security/ -v   # 64 offline red-team tests (all mocked)
+pip-audit -r RAA/requirements.txt   # dependency CVE scan
+bandit -r RAA/app                   # static security lint
+```
 
 ## Layout
-`app/` — `agents/` (planner, researcher, writer), `graph/` (builder + supervisor), `schemas/`
-(Pydantic contracts), `tools/` (Tavily search + fetch/extract), `store/` (Redis persistence),
-`llm/` (provider chain + token meter), `config.py`, `main.py`. `api/` is empty until Phase 5.
-See `../Agent.MD` §13.
+`app/` — `agents/` (planner, researcher, writer, contradiction), `graph/` (builder + supervisor),
+`schemas/` (Pydantic contracts), `tools/` (Tavily search + fetch/extract), `security/` (SSRF-safe
+fetch, URL normalization, secret redaction), `store/` (Redis persistence), `llm/` (provider chain +
+token meter), `api/` (routes, security middleware/hooks, `index.html` UI), `credibility.py`,
+`config.py`, `main.py`. Docker: `Dockerfile`, `docker-compose.yml`. The red-team suite
+(`tests/security/`), `pytest.ini`, and `requirements-dev.txt` live in the **parent** folder (`../`),
+outside the deployable project. See `../Agent.MD` §13 and [`SECURITY.md`](../SECURITY.md).

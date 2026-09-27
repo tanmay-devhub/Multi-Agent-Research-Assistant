@@ -1,22 +1,21 @@
-"""Tavily web search + real page fetch/extract → structured SearchResult (Agent.MD §6).
+"""Tavily discovery + SSRF-safe page fetch → structured SearchResult (Agent hardening §1, §4, §6).
 
-Discovery is Tavily; content is the *actual fetched page*, because search snippets are truncated
-and misleading (§6). Every failure is converted into a SearchStatus, never a bare exception the
-supervisor can't route around. Per-page content is capped to protect the token budget.
+Tavily is used ONLY to discover candidate URLs. Content always comes from our own SSRF-safe fetch
+(`app.security.secure_fetch`); Tavily snippets / raw_content are never treated as evidence. A page
+becomes a SourceDoc only if our fetch succeeds. Every failure is a SearchStatus, never an exception.
 """
 from __future__ import annotations
 
 import html
 import re
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
-import httpx
-
 from app.config import settings
+from app.credibility import score_source
 from app.schemas import SearchResult, SearchStatus, SourceDoc
+from app.security import normalize_url, secure_fetch
 
-_FETCH_TIMEOUT = 10.0
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; RAA-Researcher/1.0)"}
 _SCRIPT_STYLE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
@@ -45,34 +44,13 @@ def _classify(exc: Exception) -> SearchStatus:
     return SearchStatus.timed_out
 
 
-def _fetch_and_extract(url: str, title: str, client: httpx.Client) -> SourceDoc | None:
-    """Fetch the real page and extract readable text. Per-URL failures return None (skip it)."""
-    try:
-        resp = client.get(url, headers=_HEADERS, timeout=_FETCH_TIMEOUT, follow_redirects=True)
-    except httpx.HTTPError:
-        return None
-    if resp.status_code >= 400:
-        return None
-    ctype = resp.headers.get("content-type", "")
-    if "html" not in ctype and "text" not in ctype:
-        return None
-    text = _html_to_text(resp.text)[: settings.max_page_chars]
-    if not text:
-        return None
-    return SourceDoc(url=url, title=title, content=text)
-
-
 def tavily_search(query: str) -> SearchResult:
-    """Search + fetch/extract for one query. Returns a structured result or a failure state."""
+    """Search + SSRF-safe fetch/extract for one query. Structured result or a failure state."""
     if not settings.tavily_api_key:
         return SearchResult(query=query, status=SearchStatus.no_results)
 
     try:
-        raw = _client().search(
-            query,
-            max_results=settings.max_results_per_search,
-            include_raw_content=True,
-        )
+        raw = _client().search(query, max_results=settings.max_results_per_search)
     except Exception as exc:  # Tavily/transport failure → routable state (§6), never a crash
         return SearchResult(query=query, status=_classify(exc))
 
@@ -80,26 +58,47 @@ def tavily_search(query: str) -> SearchResult:
     if not hits:
         return SearchResult(query=query, status=SearchStatus.no_results)
 
+    # De-dup candidate URLs (canonical form), preserving Tavily's ranking order.
+    candidates: list[tuple[str, str]] = []   # (canonical_url, title)
+    seen: set[str] = set()
+    for hit in hits:
+        url = normalize_url(hit.get("url") or "")
+        if url is None or url in seen:
+            continue
+        seen.add(url)
+        candidates.append((url, (hit.get("title") or "")[: settings.max_title_chars]))
+
+    attempts = len(candidates)
+    # Fetch in parallel (bounded) — same sources, far less wall-time. secure_fetch is self-contained
+    # per call (own client/DNS), so it is thread-safe; it never raises.
     docs: list[SourceDoc] = []
-    with httpx.Client() as client:
-        for hit in hits:
-            url = hit.get("url")
-            if not url:
+    if candidates:
+        workers = max(1, min(settings.max_concurrent_fetches, len(candidates)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            outcomes = list(pool.map(lambda c: (c, secure_fetch(c[0])), candidates))
+        for (url, title), outcome in outcomes:   # order preserved by pool.map
+            if not outcome.ok:
+                continue                     # blocked/oversized/failed URLs are simply dropped
+            text = _html_to_text(outcome.text)[: settings.max_page_chars]
+            if not text:
                 continue
-            title = hit.get("title") or ""
-            doc = _fetch_and_extract(url, title, client)
-            if doc is None:
-                # Fall back to Tavily's server-side extraction (raw_content) — still a real page,
-                # not the snippet. Skip the URL only if that is empty too.
-                raw_content = (hit.get("raw_content") or "").strip()
-                if raw_content:
-                    doc = SourceDoc(url=url, title=title, content=raw_content[: settings.max_page_chars])
-            if doc is not None:
-                docs.append(doc)
+            final_url = outcome.final_url or url
+            docs.append(SourceDoc(
+                url=final_url,
+                title=title,
+                content=text,
+                content_sha256=outcome.content_sha256,
+                status_code=outcome.status_code,
+                content_type=(outcome.content_type or "")[:100] or None,
+                credibility_score=score_source(
+                    final_url, outcome.status_code, outcome.elapsed_ms,
+                    outcome.redirects, text, title,
+                ),
+            ))
 
     if not docs:
-        return SearchResult(query=query, status=SearchStatus.no_results)
-    return SearchResult(query=query, status=SearchStatus.ok, docs=docs)
+        return SearchResult(query=query, status=SearchStatus.no_results, fetch_attempts=attempts)
+    return SearchResult(query=query, status=SearchStatus.ok, docs=docs, fetch_attempts=attempts)
 
 
 def get_search_fn():

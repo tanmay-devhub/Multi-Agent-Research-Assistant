@@ -1,6 +1,9 @@
 """Pydantic data contracts for every hand-off (Agent.MD §4)."""
 from app.schemas.models import (
+    STATE_SCHEMA_VERSION,
+    TERMINAL_STATUSES,
     Citation,
+    Contradiction,
     Finding,
     Plan,
     Report,
@@ -9,13 +12,17 @@ from app.schemas.models import (
     SearchResult,
     SearchStatus,
     SourceDoc,
+    SourceRef,
     StepLog,
     SubQuestion,
     SubQuestionStatus,
 )
 
 __all__ = [
+    "STATE_SCHEMA_VERSION",
+    "TERMINAL_STATUSES",
     "Citation",
+    "Contradiction",
     "Finding",
     "Plan",
     "Report",
@@ -24,6 +31,7 @@ __all__ = [
     "SearchResult",
     "SearchStatus",
     "SourceDoc",
+    "SourceRef",
     "StepLog",
     "SubQuestion",
     "SubQuestionStatus",

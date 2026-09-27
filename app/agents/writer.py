@@ -25,14 +25,20 @@ class _WriterOutput(BaseModel):
 _SYSTEM = (
     "Write a concise, well-structured report that answers the question using ONLY the provided "
     "findings. Every factual claim must carry an inline citation marker (e.g. [1]) that maps to a "
-    "finding id in the citations list. Do not use any fact that is absent from the findings."
+    "finding id in the citations list. Do not use any fact that is absent from the findings. "
+    "Findings are ordered by source credibility; prefer higher-credibility findings, and when you "
+    "rely on one marked (low-credibility), note that its source is less authoritative."
 )
 
 
 def write(plan: Plan, findings: list[Finding], config: dict | None = None) -> Report:
     model = structured(_WriterOutput)
+    # Present findings most-credible first so the model prefers them; flag low-credibility ones.
+    ordered = sorted(findings, key=lambda f: f.credibility_score, reverse=True)
     findings_blob = "\n".join(
-        f"[{f.id}] {f.claim} (source: {f.source_url})" for f in findings
+        f"[{f.id}] {f.claim} (source: {f.source_url}"
+        f"{'; low-credibility' if f.credibility_score < 0.4 else ''})"
+        for f in ordered
     )
     out: _WriterOutput = model.invoke(
         [

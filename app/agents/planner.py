@@ -30,10 +30,15 @@ _SYSTEM = (
 
 
 def plan(question: str, config: dict | None = None) -> Plan:
+    question = (question or "").strip()[: settings.max_question_chars]
     model = structured(_PlannerOutput)
     out: _PlannerOutput = model.invoke([("system", _SYSTEM), ("human", question)], config=config)
     subs = [
-        SubQuestion(text=s.text, rationale=s.rationale)
+        SubQuestion(
+            text=(s.text or "").strip()[: settings.max_sub_question_chars],
+            rationale=(s.rationale or "").strip()[: settings.max_sub_question_chars],
+        )
         for s in out.sub_questions[: settings.max_sub_questions]
+        if (s.text or "").strip()
     ]
     return Plan(question=question, sub_questions=subs)
