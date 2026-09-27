@@ -1,0 +1,28 @@
+# Orchestration
+langgraph
+langchain-core
+
+# LLM providers — the provider chain is set via PRIMARY_PROVIDER / FALLBACK_PROVIDERS in .env
+langchain-google-genai   # gemini (primary, free tier)
+langchain-openai         # ollama_cloud + openrouter + openai_compatible (all OpenAI-compatible)
+
+# Search
+tavily-python
+
+# State store
+redis
+
+# API
+fastapi
+uvicorn[standard]
+
+# Schemas / config
+pydantic
+pydantic-settings
+
+# HTTP / page fetch
+httpx
+
+# Testing
+pytest
+pytest-asyncio
