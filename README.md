@@ -1,140 +1,167 @@
-# Multi-Agent Research Assistant (RAA)
+# Multi-Agent Research Assistant
 
-Give it a research question, get back a **fully-cited report** — with **durable state** (survives a
-crash/restart), **hard spend budgets**, and a **step-level trace** for every run. Supervisor/worker
-topology on LangGraph.
+Give it a research question, get back a **fully-cited report** — every claim traced to a real,
+fetched web source. Built as a supervisor/worker multi-agent system on **LangGraph**, with durable
+state, hard spend budgets, a step-level trace, live streaming, and production security hardening.
 
-Full spec & rules: [`../Agent.MD`](../Agent.MD). Task backlog: [`../Task.MD`](../Task.MD).
+> **Status:** complete and verified end-to-end. On a free LLM tier a full run is latency-bound
+> (~5–10 min) and may end in a graceful `*_exhausted` / `failed` state under quota limits — findings
+> are preserved and the process never crashes.
 
-## Status
-**All phases (0–5) complete and live-verified, plus production security hardening and three
-extensions** (2026-09-27). The pipeline runs end-to-end (cited report with intact provenance),
-Redis persistence + resume-without-replay + provider failover confirmed, the FastAPI API + SSE +
-browser UI are live, and the security suite is green (`pytest tests/security/ -v` → 64 passed).
-Extensions: cross-source **contradiction detection**, source **credibility scoring**, and a
-**red-team test suite**. See [`SECURITY.md`](../SECURITY.md).
+---
 
-> Note: on the free LLM tier a full run is latency-bound (~5–10 min) and may end in a graceful
-> `*_exhausted`/`failed` terminal state under quota load (findings preserved, never a crash).
+## What it does
+
+```
+question
+   │
+   ▼
+ planner ──► researcher ──► review ──► analyze ──► writer ──► cited report
+ (LLM)       (LLM+web)     (code)      (LLM)       (LLM)
+```
+
+1. **Planner** splits the question into focused, searchable sub-questions.
+2. **Researcher** plans queries, discovers URLs via Tavily, **fetches and extracts the real page**
+   (search snippets are never trusted as evidence), and synthesizes `Finding`s with provenance.
+3. **Supervisor** (pure code, no LLM) reviews each result, routes, retries once, and enforces budgets.
+4. **Analyze** detects **cross-source contradictions** for the same sub-question.
+5. **Writer** produces the report with inline citations validated against real findings, preferring
+   higher-**credibility** sources and flagging weak ones; contradictions are surfaced with
+   `[CONFLICTING]` markers.
+
+State is persisted to Redis after every node, so a killed run **resumes from where it stopped —
+without replaying** completed work.
 
 ## Stack
-Python 3.11–3.14 · LangGraph · Tavily · Redis · FastAPI · Pydantic v2 · LLM: **cloud provider chain**
-(primary + automatic fallbacks).
 
-## LLM provider chain (cloud only, no local)
-The system tries the primary provider first and **falls back automatically** on any error (with
-`max_retries=0`, so failover is immediate). Set the order with `PRIMARY_PROVIDER` and
-`FALLBACK_PROVIDERS` in `.env` — no code change.
+Python 3.11+ · LangGraph · Tavily · Redis · FastAPI + SSE · Pydantic v2 · httpx · an LLM **provider
+chain** (cloud only, automatic fallback).
 
-| order | provider            | model (default)                             | notes                                   |
-|-------|---------------------|---------------------------------------------|-----------------------------------------|
-| 1     | `gemini`            | `gemini-3.8-flash`                          | primary; free tier ≈ **20 req/day**     |
-| 2     | `openrouter`        | `nvidia/nemotron-3-super-120b-a12b:free`    | first fallback; free, structured-output |
-| 3     | `ollama_cloud`      | `gpt-oss:120b` (OpenAI-compat `/v1`)        | last resort (structured output flaky)   |
-| —     | `openai_compatible` | any (`OPENAI_BASE_URL`)                     | optional                                |
+## LLM provider chain
 
-Why this order: the pipeline is dominated by *structured-output* calls. Gemini is highest-quality
-but its free tier is tiny, so **OpenRouter is the first fallback** (a currently-free model that
-reliably emits structured output). Ollama Cloud is last because its OpenAI-compatible endpoint does
-not do structured output reliably.
+The primary provider is tried first and **fails over automatically** on any error (`max_retries=0`,
+so failover is immediate). Order and models are set via `PRIMARY_PROVIDER` / `FALLBACK_PROVIDERS` in
+`.env` — no code change.
 
-> ⚠️ **Free-tier limits are real.** Gemini free ≈ 20 requests/day; OpenRouter free models throttle
-> ~per-minute; free model IDs rotate (both `gemini-2.5-flash` and `deepseek…:free` went dead during
-> the build). A run makes ~10 LLM calls, so for real throughput use a paid Gemini tier or OpenRouter
-> credits. Failover keeps runs graceful (partial report) rather than crashing when a tier is spent.
+| order | provider            | model (default)                          | notes                                   |
+|-------|---------------------|------------------------------------------|-----------------------------------------|
+| 1     | `gemini`            | `gemini-3.8-flash`                       | primary; free tier ≈ 20 req/day         |
+| 2     | `openrouter`        | `nvidia/nemotron-3-super-120b-a12b:free` | first fallback; free, structured-output |
+| 3     | `ollama_cloud`      | `gpt-oss:120b` (OpenAI-compatible)       | last resort                             |
+| —     | `openai_compatible` | any (`OPENAI_BASE_URL`)                  | optional                                |
 
-## Setup
+> ⚠️ Free tiers throttle hard and free model IDs rotate — verify the model still exists. For real
+> throughput use a paid Gemini tier or OpenRouter credits. Failover keeps a run graceful (partial
+> report) rather than crashing when a tier is exhausted.
+
+## Quickstart
+
 ```bash
-cd RAA
+git clone https://github.com/<your-user>/Multi-Agent-Research-Assistant.git
+cd Multi-Agent-Research-Assistant
+
 python -m venv .venv
-.venv\Scripts\activate            # Windows  (source .venv/bin/activate on macOS/Linux)
+.venv\Scripts\activate            # Windows  ·  source .venv/bin/activate on macOS/Linux
 pip install -r requirements.txt
-copy .env.example .env            # then fill in keys
-```
-- Keys: Gemini https://aistudio.google.com/apikey · OpenRouter https://openrouter.ai/keys ·
-  Ollama Cloud https://ollama.com/settings/keys · Tavily https://app.tavily.com (search).
-- Redis (required for persistence/resume): `docker run -d --name raa-redis -p 6379:6379 redis:7-alpine`
-  (`docker start raa-redis` to bring it back). If Redis is down, runs still work but without
-  persistence or crash-resume.
 
-## Run
-```bash
-uvicorn app.main:app          # do NOT use --reload in production
-# UI:    http://localhost:8000/        (ask a question, watch live progress, read the cited report)
-# health: /health  ·  readiness: /ready  ·  docs (dev only): /docs
-```
-Or drive the graph directly, no server:
-```bash
-.venv\Scripts\python -c "from app.graph.builder import run_research; s=run_research('Your question?'); print(s.status); print(s.report.body)"
-# resume a run (continues from the last node, no replay):
-.venv\Scripts\python -c "from app.graph.builder import resume_research; print(resume_research('<run_id>').status)"
-```
-Production: use the hardened `docker-compose.yml` (`ENVIRONMENT=production` disables docs, enforces
-config validation; Redis stays internal-only; API binds host loopback).
+cp .env.example .env              # then fill in your keys
 
-## API
-- `POST /research` → `202` + `run_id` (async; runs on a background worker)
-- `GET /research/{id}` → status + cited report (`citations_valid`, source/finding/token counts)
-- `GET /research/{id}/trace` → full step log (agent, output, tokens, latency)
-- `GET /research/{id}/stream` → **SSE** live progress
-- `POST /research/{id}/cancel` → durable cancellation (`cancelled` state, findings kept)
-- `GET /` → browser UI · `GET /health` (liveness) · `GET /ready` (readiness)
+# Redis (for persistence / resume):
+docker run -d --name raa-redis -p 6379:6379 redis:7-alpine
+
+uvicorn app.main:app              # do NOT use --reload in production
+# open http://localhost:8000/
+```
+
+Keys: [Gemini](https://aistudio.google.com/apikey) ·
+[OpenRouter](https://openrouter.ai/keys) ·
+[Ollama Cloud](https://ollama.com/settings/keys) ·
+[Tavily](https://app.tavily.com) (search). If Redis is down, runs still work but without persistence
+or resume.
+
+## Usage
+
+**Browser UI** — `GET /` : ask a question, watch live progress stream in, read the cited report.
+
+**API**
+
+| endpoint | purpose |
+|----------|---------|
+| `POST /research` | `202` + `run_id` (runs asynchronously on a background worker) |
+| `GET /research/{id}` | status + cited report (`citations_valid`, counts, tokens) |
+| `GET /research/{id}/trace` | full step log (agent, output, tokens, latency) |
+| `GET /research/{id}/stream` | live progress via Server-Sent Events |
+| `POST /research/{id}/cancel` | durable cancellation (findings preserved) |
+| `GET /health` · `GET /ready` | liveness · readiness |
 
 Run-scoped endpoints pass through an authorization hook — **knowing a `run_id` is not
-authorization** (single-user permissive by default; wire real auth in `app/api/security.py`).
+authorization** (permissive single-user by default; wire real auth in `app/api/security.py`).
 
-## How it works
-1. **Planner** (LLM) → splits the question into focused sub-questions (`app/agents/planner.py`).
-2. **Researcher** (LLM + web) → per sub-question: plans queries, Tavily searches, **fetches &
-   extracts real pages** (snippets not trusted), synthesizes `Finding`s with provenance
-   (`app/agents/researcher.py`, `app/tools/search.py`).
-3. **Supervisor** (pure code, no LLM) → reviews, routes, retries once, enforces budgets
-   (`app/graph/supervisor.py`).
-4. **Analyze** (LLM) → flags cross-source **contradictions** for the same sub-question
-   (`app/agents/contradiction.py`); the writer surfaces them with `[CONFLICTING]` markers.
-5. **Writer** (LLM) → cited report; citations validated against real findings; prefers
-   higher-**credibility** sources (`app/credibility.py`) and flags low-credibility ones.
+**Without the server** — drive the graph directly:
 
-Graph: `planner → researcher → review → analyze → writer`, wired in `app/graph/builder.py`.
-`RunState` (`app/schemas/models.py`) is both the graph state and the persisted object.
-
-## Security
-Production-hardened: SSRF-safe web fetch (single egress, private/metadata-IP blocking, redirect
-re-validation), deterministic prompt-injection isolation, a full provenance chain (every citation →
-finding → fetched source), hard budgets with explicit terminal states, safe Redis state (versioned,
-validated, locked), and a hardened API (strict schemas, CSP/security headers, sanitized errors,
-authz/quota hooks). Full model: [`SECURITY.md`](../SECURITY.md). Deploy with the hardened
-`docker-compose.yml` (non-root, read-only FS, internal-only Redis). Scan with `pip-audit` / `bandit`
-(`requirements-dev.txt`).
-
-## What makes this real (not a demo)
-- Budgets enforced in code (`app/config.py`), never in prompts: max sub-questions, searches/sub-q,
-  total tokens, 5-min wall-clock, one reviewer send-back, per-domain cap, URL dedup.
-- External failures are **states** (`no_results`/`rate_limited`/`paywalled`/`timed_out`) the
-  supervisor routes around; planner/researcher/writer errors degrade to a partial-but-valid result.
-- Every finding carries provenance; every claim is a citation validated against a real finding.
-- Run state persisted to Redis after every node → a killed process **resumes, it does not replay**
-  (verified live via `resume_research`).
-- Cross-source **contradictions** are detected and surfaced; sources carry a **credibility score**
-  the writer uses to prefer authoritative evidence and flag weak sources.
-- Security is deterministic and code-enforced (SSRF, provenance, budgets, redaction) — not
-  prompt-based — and covered by an offline red-team test suite.
-
-## Tests
-Tests + dev tooling live in the **parent folder** (`../`) so this folder stays deployable. Run from
-the parent (`D:\RA`) using this project's venv:
 ```bash
-RAA\.venv\Scripts\python -m pip install -r requirements-dev.txt
-RAA\.venv\Scripts\python -m pytest tests/security/ -v   # 64 offline red-team tests (all mocked)
-pip-audit -r RAA/requirements.txt   # dependency CVE scan
-bandit -r RAA/app                   # static security lint
+python -c "from app.graph.builder import run_research; s = run_research('Your question?'); print(s.status); print(s.report.body)"
+python -c "from app.graph.builder import resume_research; print(resume_research('<run_id>').status)"  # resume, no replay
 ```
 
-## Layout
-`app/` — `agents/` (planner, researcher, writer, contradiction), `graph/` (builder + supervisor),
-`schemas/` (Pydantic contracts), `tools/` (Tavily search + fetch/extract), `security/` (SSRF-safe
-fetch, URL normalization, secret redaction), `store/` (Redis persistence), `llm/` (provider chain +
-token meter), `api/` (routes, security middleware/hooks, `index.html` UI), `credibility.py`,
-`config.py`, `main.py`. Docker: `Dockerfile`, `docker-compose.yml`. The red-team suite
-(`tests/security/`), `pytest.ini`, and `requirements-dev.txt` live in the **parent** folder (`../`),
-outside the deployable project. See `../Agent.MD` §13 and [`SECURITY.md`](../SECURITY.md).
+## What makes it production-grade
+
+- **Budgets enforced in code, never in prompts** (`app/config.py`): max sub-questions,
+  searches/sub-question, total searches/fetches, findings, citations, tokens, wall-clock, graph
+  steps, per-domain cap, URL dedup. Exhaustion ends in an explicit terminal state.
+- **Failure-as-state**: search/fetch/LLM failures become states the supervisor routes around; the
+  run always produces a partial-but-valid result, never a crash.
+- **Provenance**: every finding is bound to a real fetched source (`source_id` + SHA-256); every
+  citation is validated against a real finding before the report ships — invented/orphan citations
+  are dropped.
+- **Durable state & resume**: state written to Redis after every node; a killed process resumes
+  without replaying completed work; per-run locking prevents duplicate execution.
+- **Contradiction detection** and **credibility scoring** across sources.
+
+## Security
+
+Security is **deterministic and code-enforced**, not prompt-based — an LLM can be told anything, but
+these controls sit outside its reach:
+
+- **SSRF-safe fetch** (`app/security/`): a single outbound egress that resolves hosts and blocks
+  loopback / private / link-local / cloud-metadata addresses (IPv4 + IPv6), re-validates every
+  redirect, enforces timeouts + response-size caps + a content-type allowlist, and sends no
+  cookies/auth/proxy. Snippets and search results are treated as data, never instructions.
+- **Strict Pydantic validation** at every boundary with hard size/count limits; no
+  `eval`/`exec`/`pickle`/`shell=True`.
+- **Secret redaction** across traces, logs, errors, and API responses.
+- **Hardened API**: strict request/response schemas, body-size limit, sanitized error handlers with
+  request IDs, security headers + CSP, trusted-host and CORS controls, docs disabled in production.
+- **Hardened deployment**: `docker-compose.yml` runs non-root, read-only filesystem, dropped
+  capabilities, internal-only Redis, and no secrets baked into the image.
+
+## Configuration
+
+All settings come from environment / `.env` (see `.env.example`). Highlights: provider chain +
+model IDs, budgets, secure-fetch limits, Redis URL + TTLs, and `ENVIRONMENT=production` (disables
+docs and enforces startup config validation).
+
+## Deployment
+
+```bash
+# set REDIS_PASSWORD and provider keys in your environment or .env, then:
+docker compose up --build
+```
+
+The build context ships only `app/` + pinned runtime dependencies — no dev tooling, no secrets.
+
+## Project layout
+
+```
+app/
+  agents/     planner · researcher · writer · contradiction
+  graph/      builder (state graph) · supervisor (routing/review/budgets)
+  schemas/    Pydantic data contracts + RunState
+  tools/      Tavily search + page fetch/extract
+  security/   SSRF-safe fetch · URL normalization · secret redaction
+  store/      Redis persistence, locking, cancellation
+  llm/        provider chain + token metering
+  api/        routes · security middleware/hooks · browser UI
+  credibility.py · config.py · main.py
+Dockerfile · docker-compose.yml · requirements.txt · .env.example
+```
